@@ -34,6 +34,19 @@ internal/config/    env → validated Config (every error reported at once)
 (lint, tests with `-race`, govulncheck, `go mod tidy -diff`).
 Local env goes in `.env` (copy `.env.example`); the Makefile exports it.
 
+## Branches
+
+| Branch | Deploys to | Receives |
+|---|---|---|
+| `main` | prod | Only `develop`, merged by hand by the user |
+| `develop` | dev | Every PR (`feature/*`, `fix/*`, `chore/*`, `docs/*`) |
+
+Every PR targets `develop`, with no exceptions. Never open a PR into `main`,
+merge into `main` or push to it: promoting `develop` to `main` is the user's
+manual step. If a PR's base would be `main`, stop and warn instead of opening
+it. A PR from any branch other than `develop` into `main` also fails the
+`pr-target` check (`.github/workflows/pr-target.yml`).
+
 ## Conventions
 
 - `main.go` stays thin; logic lives under `internal/`.
