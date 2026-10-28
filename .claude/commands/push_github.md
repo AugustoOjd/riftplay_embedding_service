@@ -105,8 +105,8 @@ Pushing a red build wastes a CI run and hides the next real failure. A failure h
 
 ## 6. Push
 
-- **On `main` or `master`, ask first**, even when everything above passed. Pushing
-  straight to the default branch is a decision the user makes, not a default.
+- **On `main`, stop: never push it.** Promoting `develop` to `main` is the
+  user's manual merge (see "Branches" in CLAUDE.md). Say so and push nothing.
 - Never `--force` or `--force-with-lease` unless the user asks for it in this same
   turn.
 

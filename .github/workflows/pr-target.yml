@@ -1,0 +1,27 @@
+# Every PR targets develop. main only receives develop, merged by hand; a PR
+# from any other branch into main fails this check.
+name: pr-target
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only develop may target main
+        # Branch names come from the PR author: read them from env, never
+        # interpolate ${{ }} into the script.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_REF" in
+            develop)
+              echo "OK: $HEAD_REF -> main" ;;
+            *)
+              echo "::error title=Wrong base branch::'$HEAD_REF' targets main. Change the PR base to develop: every PR targets develop."
+              exit 1 ;;
+          esac
