@@ -1,7 +1,7 @@
 # Diseño del RAG de reglas (borrador)
 
 Resumen de lo discutido el 2026-10-28. Nada de esto está implementado; las decisiones marcadas
-como **abiertas** siguen pendientes.
+como **abiertas** siguen pendientes, y las tomadas se revisan al implementar cada parte.
 
 ## 1. Búsqueda semántica vs. RAG
 
@@ -36,8 +36,8 @@ calidad no alcanza.
   - mismo hash → no hace nada;
   - hash distinto → reemplaza los fragmentos de ese documento;
   - identidad nueva → lo crea.
-- Solo cargan administradores. Además del sync automático, queda una carga manual para
-  documentos que no están en el hub, como las guías actuales de `corpus/`.
+- **Todo es automático:** la única fuente es el sync del Rules Hub. **No hay carga manual**;
+  lo que hoy está en `corpus/` y no está en el hub queda fuera del corpus.
 
 ## 4. Sincronización diaria con el Rules Hub
 
@@ -78,7 +78,12 @@ Core Rules nuevo convive con el viejo y el bot cita reglas derogadas.
 **Fragmentación:** Core Rules **por número de regla**, con el número en la metadata para que
 el bot cite "regla 357.2". El resto, por tamaño (1000/200).
 
-**No hace falta un agente LLM:** es un job determinístico (cron).
+**El pipeline es determinístico** (cron, sin LLM). Un agente LLM interviene solo cuando una
+corrida termina con errores o chequeos de calidad que no pasan: ver §9.
+
+**Lectura del hub:** playriftbound.com es Next.js, así que se lee el JSON de `__NEXT_DATA__`
+con `gjson`, igual que la galería de cartas en `ingest`. Spike pendiente: confirmar que el
+texto de patch notes y errata viene ahí.
 
 ## 5. Costo
 
@@ -89,8 +94,8 @@ Medido el 2026-10-28 (caracteres/4 ≈ tokens):
 | Core Rules | 375k | ~94k |
 | Tournament Rules | 166k | ~42k |
 | Patch notes + erratas (estimado) | ~150k | ~37k |
-| `corpus/` manual | 252k | ~63k |
-| **Total con solapamiento (+25%)** | | **~300k** |
+| ~~`corpus/` manual~~ (descartado, sin carga manual) | ~~252k~~ | ~~~63k~~ |
+| **Total con solapamiento (+25%)** | | **~220k** |
 
 Con `text-embedding-3-small` (USD 0,02 por millón de tokens; **verificar precio**), una
 corrida completa cuesta ~USD 0,006: reindexar todo cada semana sale unos **USD 0,30 al año**.
@@ -116,11 +121,10 @@ Mismo patrón que `ingest`: Go es dueño del dato y esta API lo consume.
 
 **Servicio Go:**
 
-- tablas y migraciones propias: documentos (identidad, URL, hash, ETag, `checked_at`) y
-  fragmentos (vector, `embedding_model`, número de regla);
+- tablas y migraciones propias en el schema `rules` (§8);
 - el cron diario del Rules Hub;
-- la carga manual para admins;
-- `POST /search {query, k}` → fragmentos con `source`, número de regla y puntaje.
+- el agente de revisión (§9);
+- `POST /search` (§7).
 
 **Esta API:**
 
@@ -129,18 +133,163 @@ Mismo patrón que `ingest`: Go es dueño del dato y esta API lo consume.
 - `Settings`: URL del servicio y secreto interno (llamada saliente, como dolarapi; la regla
   de "no API key" aplica a los clientes de esta API).
 
-## 7. Decisiones abiertas
+**Servicio propio** (`riftplay_embedding_service`), no dentro de `ingest`: son dos
+responsabilidades distintas.
 
-1. **Contrato de `/search`:** qué recibe y qué devuelve cada fragmento. Es el primer paso:
-   permite construir los dos lados en paralelo.
-2. **Si Go no responde:** propuesta de fail open. La tool devuelve "búsqueda no disponible" y
+## 7. Contrato de `POST /search`
+
+**Red:** privada en Railway (`*.railway.internal`, sin dominio público) y además
+`Authorization: Bearer $INTERNAL_API_SECRET` (mín. 32 caracteres, comparación en tiempo
+constante, nunca se loguea). `GET /healthz` queda sin auth.
+
+```
+POST /search
+{
+  "query": "¿puedo jugar dos runas por turno?",
+  "k": 4,                                   // opcional, default 4, máx. 10
+  "documents": ["core-rules", "errata/*"]   // opcional; identidad lógica o prefijo/*
+}
+
+200 OK
+{
+  "model": "text-embedding-3-small",
+  "results": [
+    {
+      "id": "0193f...",
+      "document": "core-rules",
+      "title": "Core Rules",
+      "source_url": "https://cmsassets.rgpub.io/...pdf",
+      "rule": "357.2",          // null fuera del Core Rules
+      "text": "...",
+      "score": 0.82             // similitud coseno
+    }
+  ]
+}
+```
+
+| Caso | Respuesta |
+|---|---|
+| `query` vacía, `k` fuera de rango, identidad inválida | `400 {"error": "..."}` |
+| Falta el secreto o es incorrecto | `401 {"error": "unauthorized"}` |
+| OpenAI falló o timeout | `502 {"error": "embedding provider"}` |
+| Postgres no responde | `503 {"error": "database"}` |
+| Nada encontrado / corpus vacío | `200` con `results: []` |
+
+Python trata 4xx como bug propio y 5xx como fail open.
+
+## 8. Base de datos
+
+Mismo Postgres, **schema propio `rules`** con extensión `vector`. Alembic ignora el schema
+entero (filtro por schema, no por lista de tablas). Python nunca lo lee.
+
+```
+rules.documents
+  id            text PK          -- 'core-rules', 'errata/origins'
+  kind          text NOT NULL    -- core | tournament | patch | errata | legality
+  title         text NOT NULL
+  source_url    text
+  etag          text
+  last_modified text
+  content_hash  text NOT NULL    -- sha256 del texto extraído
+  checked_at    timestamptz NOT NULL
+  updated_at    timestamptz NOT NULL
+
+rules.fragments
+  id              uuid PK (v7)
+  document_id     text FK → documents ON DELETE CASCADE
+  ordinal         int NOT NULL
+  rule            text           -- '357.2' o null
+  text            text NOT NULL
+  embedding       vector(1536) NOT NULL
+  embedding_model text NOT NULL
+  UNIQUE (document_id, ordinal)
+  INDEX hnsw (embedding vector_cosine_ops)
+
+rules.sync_runs
+  id, started_at, finished_at, status (ok | failed), checked, changed text[], error
+```
+
+Una versión nueva con hallazgos queda **pendiente** y `/search` sigue sirviendo la aprobada
+(§9). Cómo se modela "pendiente" (columna de estado o tabla aparte) se define al implementar.
+
+## 9. Agente de revisión
+
+El pipeline normal no usa LLM. El agente corre **solo** cuando una corrida termina con
+hallazgos; los días normales no gasta tokens.
+
+**Disparadores:**
+
+- **error:** descarga, parseo u OpenAI fallaron tras los reintentos;
+- **salvaguarda:** 0 documentos, falta `core-rules`, sección desconocida en el hub;
+- **calidad:** las reglas detectadas cayeron >10% contra la versión anterior, fragmentos
+  vacíos o gigantes, números de regla fuera de orden, golden queries que fallan.
+
+**Golden queries:** archivo versionado en el repo (~20 preguntas en español, como preguntan
+los usuarios) con el documento y la regla esperados en el top-k. Umbral: ≥ 90% de aciertos y
+sin caída contra la versión anterior. Sirven también como test de integración y para comparar
+modelos.
+
+**Acciones (allowlist, nunca borra):**
+
+| Solo | Pregunta al usuario |
+|---|---|
+| `retry_document(id)` | Aprobar con chequeos fallando |
+| `rechunk(id, strategy)` (reglas ↔ 1000/200) | Borrar un documento que desapareció del hub |
+| `run_golden_queries(id)` | Agregar un dominio permitido |
+| `approve_pending(id)`, solo si **todos** los chequeos pasan | Cualquier cosa fuera de la allowlist |
+| `ignore_section(name)` | |
+
+Nunca: SQL libre, fetch a dominios no permitidos, borrar.
+
+**Qué ve:** el reporte estructurado de la corrida (errores, conteos, diffs de métricas, golden
+queries fallidas) y, si lo pide con `read_sample(document_id, ordinal, n≤3)`, muestras de
+hasta 2000 caracteres envueltas como texto no confiable. Nunca el documento entero.
+
+**Cómo pregunta:** un bot de chat (Telegram o Discord) con botones, uno por opción cerrada,
+detrás de una interfaz `Notifier`. El estado vive en `rules.agent_reviews` (diagnóstico,
+opciones, estado, respuesta, quién y cuándo, tokens usados).
+
+**Sin respuesta:** se sigue sirviendo la versión aprobada, recordatorio diario, nunca expira
+ni se aplica nada por timeout. Si el hallazgo persiste en el sync siguiente se actualiza la
+misma review; si se resolvió solo, se cierra. Un documento nuevo sin versión anterior no se
+sirve hasta que haya respuesta.
+
+**Implementación:** en Go (`internal/review/`), loop de tools propio sobre la Messages API de
+Anthropic con `net/http`. Config `ANTHROPIC_API_KEY` y `REVIEW_MODEL`; máx. 10 turnos y 5 min
+por review.
+
+## 10. Stack y orden de implementación
+
+| Área | Elección |
+|---|---|
+| Postgres | `jackc/pgx/v5` + `pgxpool`, queries con `sqlc`, `pgvector/pgvector-go` |
+| Migraciones | `.sql` embebidos + `cmd/migrate` propio (copiado de `ingest`) |
+| Cron | River (cola `sync`, `MaxWorkers` 1, diario UTC + al arrancar), schema `river_embedding`; `robfig/cron/v3` |
+| Hub | `tidwall/gjson` sobre `__NEXT_DATA__` |
+| PDF | `pdftotext -layout` (poppler-utils en la imagen) por exec, con timeout y límite de descarga |
+| Embeddings | Interfaz `Embedder`; cliente OpenAI propio con `net/http`, lotes de 100, reintentos en 429/5xx. Config `OPENAI_API_KEY`, `EMBEDDING_MODEL` |
+| Tests | Integración contra `pgvector/pgvector` en Docker (local y CI), skip sin `TEST_DATABASE_URL`; unit tests con fixtures en `testdata/` |
+
+**Orden:**
+
+0. Spikes (sin código de producción): `pdftotext` sobre el Core Rules real y
+   `__NEXT_DATA__` del hub.
+1. Contrato de `/search` publicado para que Python avance en paralelo.
+2. Config + migración `0001` (schema `rules`) + `cmd/migrate`.
+3. `Embedder` + fragmentación por regla y por tamaño.
+4. Sync del hub (River, detección de cambios, `sync_runs`).
+5. `POST /search` + auth.
+6. Agente de revisión + golden queries + `Notifier`.
+7. Dockerfile con poppler-utils.
+
+## 11. Decisiones abiertas
+
+1. **Si Go no responde:** propuesta de fail open. La tool devuelve "búsqueda no disponible" y
    el agente responde aclarándolo, sin 503 sobre todo el chat.
-3. **Red:** privada en Railway, sin URL pública, con el secreto como defensa adicional.
-4. **Base de datos:** misma base (Alembic debe ignorar las tablas, como con
-   `ingest_owned_tables()`) o base aparte. Con B, Python no las lee nunca.
-5. **Parsing de PDF en Go:** probar `pdftotext` (poppler) con el Core Rules real antes de
-   comprometerse. La fragmentación por regla depende de que el texto salga limpio.
-6. **Servicio nuevo o dentro de `ingest`:** ahorra un deploy, pero mezcla dos
-   responsabilidades.
-7. **Limpieza en este repo:** `EMBEDDING_DIM = 384` y la tabla de la `0001` quedan solo por la
-   migración vieja; la tabla nueva no los reutiliza.
+2. **Spike de PDF:** confirmar que `pdftotext` saca los números de regla limpios. La
+   fragmentación por regla depende de eso.
+3. **Spike del hub:** confirmar que `__NEXT_DATA__` trae el texto de patch notes y errata.
+4. **Canal del bot:** Telegram o Discord.
+5. **Stack en `CLAUDE.md`:** sumar las dependencias del §10 a la tabla cuando se agreguen.
+6. **Limpieza en la API Python:** `EMBEDDING_DIM = 384` y la tabla de la `0001` quedan solo por
+   la migración vieja; la tabla nueva no los reutiliza.
