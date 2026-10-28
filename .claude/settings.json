@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(go run ./cmd/embedding)",
+      "Bash(go mod tidy:*)",
+      "Bash(go list:*)",
+      "Bash(go doc:*)",
+      "Bash(go version)",
+      "Bash(gofmt -l:*)",
+      "Bash(golangci-lint run:*)",
+      "Bash(golangci-lint fmt:*)",
+      "Bash(govulncheck:*)",
+      "Bash(make help)",
+      "Bash(make build)",
+      "Bash(make test)",
+      "Bash(make lint)",
+      "Bash(make fmt)",
+      "Bash(make vuln)",
+      "Bash(make check)",
+      "Bash(make run)",
+      "Read(./.env.example)",
+      "Edit(./.env.example)",
+      "Bash(railway status *)",
+      "Bash(railway domain *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Edit(./.env)",
+      "Write(./.env)",
+      "Read(./.env.local)",
+      "Edit(./.env.local)",
+      "Write(./.env.local)",
+      "Edit(/home/naod_/riftplay/**)",
+      "Write(/home/naod_/riftplay/**)",
+      "Bash(git -C /home/naod_/riftplay:*)"
+    ],
+    "ask": [
+      "Read(/home/naod_/riftplay/**)"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+# Binaries
+/embedding
+/bin/
+/dist/
+*.exe
+*.test
+
+# Profiling & coverage
+*.out
+*.prof
+coverage.html
+*.cover
+
+# Env (keep only the example)
+.env
+.env.*
+!.env.example
+
+# Local
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.claude/settings.local.json
